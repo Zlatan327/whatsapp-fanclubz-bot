@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: whatsapp-group-bot
+    env: node
+    buildCommand: "./render-build.sh"
+    startCommand: "npm start"
+    envVars:
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
+      - key: NODE_ENV
+        value: production
+      - key: DB_PATH
+        value: /data/activity.sqlite
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
