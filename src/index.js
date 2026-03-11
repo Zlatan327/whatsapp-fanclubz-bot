@@ -80,8 +80,9 @@ const server = http.createServer((req, res) => {
     }
 });
 
-server.listen(QR_PORT, () => {
-    console.log(`🌐 QR code viewer running at http://localhost:${QR_PORT}`);
+server.listen(QR_PORT, '0.0.0.0', () => {
+    const publicUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${QR_PORT}`;
+    console.log(`🌐 QR code viewer running at ${publicUrl}`);
 });
 
 let client;
@@ -185,4 +186,13 @@ process.on('SIGINT', async () => {
     await closeDb();
     await mongoose.disconnect();
     process.exit(0);
+});
+
+// Catch unhandled errors that might be silently crashing the app
+process.on('uncaughtException', (err) => {
+    console.error('❌ Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
