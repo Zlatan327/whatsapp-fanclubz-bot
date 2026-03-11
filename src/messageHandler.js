@@ -1,7 +1,7 @@
 const { 
     logMessage, getActivityLeaderboard,
     logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard,
-    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount
+    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount, clearPredictions
 } = require('./database');
 
 // ─── Prediction market domain patterns ───────────────────────────────────────
@@ -64,9 +64,10 @@ const HELP_TEXT = `🤖 *Bot Commands*
 
 👥 *General*
 /rules — Show group rules
-/everyone — Tag all group members
 
 🔧 *Admin*
+/clear — Delete all predictions for a fresh start (admin only)
+/everyone — Tag all group members (admin only)
 /kick @user — Kick a member (admin only)
 /ban @user — Ban a member (admin only)
 
@@ -114,6 +115,13 @@ const handleMessage = async (msg) => {
         return;
     }
 
+    // ─── Auto-delete non-FanClubz links from regular members ─────────────
+    if (urls.length > 0 && !isAdmin(chat, msg.from)) {
+        await msg.delete(true);
+        await msg.reply('🚫 Only FanClubz prediction links are allowed. Your message has been deleted.');
+        return;
+    }
+
     // ─── Command: /rules ─────────────────────────────────────────────────
     if (msg.body === '/rules') {
         await msg.reply(GROUP_RULES);
@@ -128,22 +136,14 @@ const handleMessage = async (msg) => {
 
     // ─── Command: /everyone ──────────────────────────────────────────────
     if (msg.body === '/everyone') {
+        if (!isAdmin(chat, msg.from)) {
+            await msg.reply('🚫 Only admins can use the /everyone command.');
+            return;
+        }
+
         try {
-            let text = '📢 *Attention everyone!*\n\n';
-            const mentions = [];
-
-            for (const participant of chat.participants) {
-                try {
-                    const contact = await chat.client.getContactById(participant.id._serialized);
-                    mentions.push(contact);
-                    const name = contact.pushname || contact.name || participant.id.user;
-                    text += `@${participant.id.user} `;
-                } catch (err) {
-                    console.error(`Could not fetch contact ${participant.id.user}:`, err.message);
-                }
-            }
-
-            await chat.sendMessage(text, { mentions });
+            const mentions = chat.participants.map(p => p.id._serialized);
+            await chat.sendMessage('📢 *@all* — Attention everyone!', { mentions });
         } catch (err) {
             console.error('Error in /everyone command:', err.message);
             await msg.reply('❌ Sorry, could not tag everyone. Please try again.');
@@ -393,6 +393,17 @@ const handleMessage = async (msg) => {
                 await msg.reply(`❌ Could not ban *${contactName}*. Make sure the bot is an admin.`);
             }
         }
+        return;
+    }
+    // ─── Command: /clear ─────────────────────────────────────────────────
+    if (msg.body === '/clear') {
+        if (!isAdmin(chat, msg.from)) {
+            await msg.reply('🚫 Only admins can clear predictions.');
+            return;
+        }
+
+        await clearPredictions(chat.id._serialized);
+        await msg.reply('🗑️ All predictions for this group have been cleared.');
         return;
     }
 };

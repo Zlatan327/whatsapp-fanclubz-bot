@@ -176,6 +176,15 @@ const getPredictionCount = async (groupId) => {
     }
 };
 
+const clearPredictions = async (groupId) => {
+    try {
+        await Prediction.deleteMany({ groupId: String(groupId) });
+        console.log(`🗑️ Cleared all predictions for group ${groupId}`);
+    } catch (err) {
+        console.error('Error clearing predictions:', err.message);
+    }
+};
+
 const close = async () => {
     console.log('Database cleanup complete.');
 };
@@ -183,6 +192,6 @@ const close = async () => {
 module.exports = { 
     initDb, logMessage, getActivityLeaderboard,
     logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard,
-    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount,
+    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount, clearPredictions,
     close 
 };
