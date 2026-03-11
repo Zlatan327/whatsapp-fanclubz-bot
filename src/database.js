@@ -20,7 +20,7 @@ const initDb = async () => {
         db = new SQL.Database();
     }
 
-    // Activity log table
+    // Activity log table — tracks every message for activity leaderboard
     db.run(`CREATE TABLE IF NOT EXISTS activity_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         messageId TEXT,
@@ -30,7 +30,7 @@ const initDb = async () => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Invite tracking table
+    // Invite tracking table — tracks who invited whom
     db.run(`CREATE TABLE IF NOT EXISTS invite_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         userId TEXT,
@@ -41,11 +41,15 @@ const initDb = async () => {
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Betting subscriptions table
-    db.run(`CREATE TABLE IF NOT EXISTS betting_subs (
-        userId TEXT,
+    // Predictions table — stores prediction market links posted in the group
+    db.run(`CREATE TABLE IF NOT EXISTS predictions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        messageId TEXT,
+        sender TEXT,
         groupId TEXT,
-        PRIMARY KEY (userId, groupId)
+        url TEXT,
+        description TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
     // Persist the initial schema to disk
@@ -61,6 +65,8 @@ const save = () => {
     const buffer = Buffer.from(data);
     fs.writeFileSync(DB_PATH, buffer);
 };
+
+// ─── Activity Logging ────────────────────────────────────────────────────────
 
 /**
  * Log a group message to the SQLite database.
@@ -78,7 +84,34 @@ const logMessage = (messageId, sender, groupName, body) => {
 };
 
 /**
- * Log a group membership change (join/leave/kick/ban).
+ * Get top message senders for a group (most-active leaderboard).
+ */
+const getActivityLeaderboard = (groupName, limit = 10) => {
+    try {
+        const results = db.exec(
+            `SELECT sender, COUNT(*) as count 
+             FROM activity_log 
+             WHERE groupName = ?
+             GROUP BY sender 
+             ORDER BY count DESC 
+             LIMIT ?`,
+            [groupName, limit]
+        );
+        if (results.length === 0) return [];
+        return results[0].values.map(row => ({
+            sender: row[0],
+            count: row[1]
+        }));
+    } catch (err) {
+        console.error('Error fetching activity leaderboard:', err.message);
+        return [];
+    }
+};
+
+// ─── Invite Tracking ─────────────────────────────────────────────────────────
+
+/**
+ * Log a group membership change (join/leave/kick/ban/intro).
  */
 const logInvite = (userId, groupId, groupName, invitedBy, action = 'join') => {
     try {
@@ -133,7 +166,6 @@ const hasIntroLog = (userId, groupId) => {
 
 /**
  * Get a leaderboard of who invited the most people in a group.
- * Counts 'join' and 'intro' actions.
  */
 const getInviteLeaderboard = (groupId, limit = 10) => {
     try {
@@ -157,43 +189,87 @@ const getInviteLeaderboard = (groupId, limit = 10) => {
     }
 };
 
+// ─── Predictions ─────────────────────────────────────────────────────────────
+
 /**
- * Subscribe a user to betting notifications in a group.
+ * Save a prediction market link to the database.
  */
-const addBettingSub = (userId, groupId) => {
+const savePrediction = (messageId, sender, groupId, url, description) => {
     try {
-        db.run('INSERT OR IGNORE INTO betting_subs (userId, groupId) VALUES (?, ?)', [userId, groupId]);
+        db.run(
+            'INSERT INTO predictions (messageId, sender, groupId, url, description) VALUES (?, ?, ?, ?, ?)',
+            [messageId, sender, groupId, url, description || '']
+        );
         save();
     } catch (err) {
-        console.error('Error adding betting sub:', err.message);
+        console.error('Error saving prediction:', err.message);
     }
 };
 
 /**
- * Unsubscribe a user from betting notifications in a group.
+ * Get recent predictions for a group.
  */
-const removeBettingSub = (userId, groupId) => {
+const getRecentPredictions = (groupId, limit = 10) => {
     try {
-        db.run('DELETE FROM betting_subs WHERE userId = ? AND groupId = ?', [userId, groupId]);
-        save();
-    } catch (err) {
-        console.error('Error removing betting sub:', err.message);
-    }
-};
-
-/**
- * Get all users subscribed to betting notifications in a group.
- */
-const getBettingSubs = (groupId) => {
-    try {
-        const results = db.exec('SELECT userId FROM betting_subs WHERE groupId = ?', [groupId]);
+        const results = db.exec(
+            'SELECT sender, url, description, timestamp FROM predictions WHERE groupId = ? ORDER BY id DESC LIMIT ?',
+            [groupId, limit]
+        );
         if (results.length === 0) return [];
-        return results[0].values.map(row => row[0]);
+        return results[0].values.map(row => ({
+            sender: row[0],
+            url: row[1],
+            description: row[2],
+            timestamp: row[3]
+        }));
     } catch (err) {
-        console.error('Error fetching betting subs:', err.message);
+        console.error('Error fetching predictions:', err.message);
         return [];
     }
 };
+
+/**
+ * Search predictions by keyword in their description or URL.
+ */
+const searchPredictions = (groupId, query, limit = 10) => {
+    try {
+        const results = db.exec(
+            `SELECT sender, url, description, timestamp FROM predictions 
+             WHERE groupId = ? AND (LOWER(description) LIKE LOWER(?) OR LOWER(url) LIKE LOWER(?))
+             ORDER BY id DESC LIMIT ?`,
+            [groupId, `%${query}%`, `%${query}%`, limit]
+        );
+        if (results.length === 0) return [];
+        return results[0].values.map(row => ({
+            sender: row[0],
+            url: row[1],
+            description: row[2],
+            timestamp: row[3]
+        }));
+    } catch (err) {
+        console.error('Error searching predictions:', err.message);
+        return [];
+    }
+};
+
+/**
+ * Get the total number of predictions stored for a group.
+ */
+const getPredictionCount = (groupId) => {
+    try {
+        const results = db.exec(
+            'SELECT COUNT(*) FROM predictions WHERE groupId = ?',
+            [groupId]
+        );
+        if (results.length === 0) return 0;
+        return results[0].values[0][0];
+    } catch (err) {
+        console.error('Error counting predictions:', err.message);
+        return 0;
+    }
+};
+
+// ─── Close ───────────────────────────────────────────────────────────────────
 
 /**
  * Close the database connection gracefully.
@@ -211,7 +287,8 @@ const close = () => {
 };
 
 module.exports = { 
-    initDb, logMessage, logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard,
-    addBettingSub, removeBettingSub, getBettingSubs, 
+    initDb, logMessage, getActivityLeaderboard,
+    logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard,
+    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount,
     close 
 };

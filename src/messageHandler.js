@@ -1,21 +1,49 @@
-const { logMessage, logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard, addBettingSub, removeBettingSub, getBettingSubs } = require('./database');
+const { 
+    logMessage, getActivityLeaderboard,
+    logInvite, getInviteLogs, hasIntroLog, getInviteLeaderboard,
+    savePrediction, getRecentPredictions, searchPredictions, getPredictionCount
+} = require('./database');
 
-// ─── URL regex to detect links ──────────────────────────────────────────────
-const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/i;
+// ─── Prediction market domain patterns ───────────────────────────────────────
+const PREDICTION_DOMAINS = [
+    'fanclubz.app',
+];
+
+const URL_REGEX = /https?:\/\/[^\s]+/gi;
+
+/**
+ * Check if a URL belongs to a known prediction market platform.
+ */
+const isPredictionUrl = (url) => {
+    const lower = url.toLowerCase();
+    return PREDICTION_DOMAINS.some(domain => lower.includes(domain));
+};
+
+// ─── Helper: resolve a WhatsApp ID to a display name ─────────────────────────
+/**
+ * Resolve a WhatsApp user ID (e.g. "2348012345678@c.us") to their display name.
+ * Falls back to the phone number only if the contact lookup fails entirely.
+ */
+const getDisplayName = async (client, userId) => {
+    try {
+        const contact = await client.getContactById(userId);
+        return contact.pushname || contact.name || contact.shortName || userId.split('@')[0];
+    } catch {
+        return userId.split('@')[0];
+    }
+};
 
 // ─── Group Rules ─────────────────────────────────────────────────────────────
 const GROUP_RULES = `📋 *Group Rules*
 
 1️⃣  *Respect Everyone* — No insults, personal attacks, or hate speech.
 2️⃣  *No Spam* — No repeated messages, chain messages, or self-promotion.
-3️⃣  *No Links Without Permission* — Links from non-admins are auto-deleted.
-4️⃣  *Stay On Topic* — Keep conversations relevant to the group purpose.
+3️⃣  *Stay On Topic* — Keep conversations about predictions and markets.
+4️⃣  *Share Predictions* — Post prediction links freely! The bot tracks them.
 5️⃣  *No NSFW Content* — No explicit, violent, or disturbing media.
 6️⃣  *English Only* — Use English so everyone can follow the conversation.
-7️⃣  *No Impersonation* — Don't pretend to be someone you're not.
-8️⃣  *Listen to Admins* — Admin decisions are final.
-9️⃣  *No Doxxing* — Never share someone's personal info without consent.
-🔟  *Have Fun!* — Be friendly and enjoy the community.
+7️⃣  *Listen to Admins* — Admin decisions are final.
+8️⃣  *Have Fun!* — Debate the odds and enjoy the community.
 
 _Violations may result in a warning, mute, kick, or ban._
 _Type /help to see available bot commands._`;
@@ -23,17 +51,28 @@ _Type /help to see available bot commands._`;
 // ─── Help text ───────────────────────────────────────────────────────────────
 const HELP_TEXT = `🤖 *Bot Commands*
 
+📊 *Predictions*
+/predictions — Show the 10 most recent prediction links
+/find <keyword> — Search saved predictions by keyword
+/stats — Show prediction stats for this group
+
+🏆 *Leaderboards & Invites*
+/intro @user — Register who invited you
+/invites — Show recent invite/join log
+/leaderboard — Top inviters leaderboard
+/active — Most active members leaderboard
+
+👥 *General*
 /rules — Show group rules
 /everyone — Tag all group members
-/intro @user — Register who invited you
-/odds_on — Subscribe to betting notifications (e.g. SportyBet codes)
-/odds_off — Unsubscribe from betting notifications
+
+🔧 *Admin*
 /kick @user — Kick a member (admin only)
 /ban @user — Ban a member (admin only)
-/invites — Show recent invite/join log
-/leaderboard — Show top inviters in the group
-/commands — Show this help message
-/help — Show this help message`;
+
+/help — Show this help message
+
+_ℹ️ The bot automatically detects and saves FanClubz prediction links posted in the group._`;
 
 /**
  * Check if the message sender is a group admin.
@@ -44,38 +83,7 @@ const isAdmin = (chat, senderId) => {
 };
 
 /**
- * Check if a text message is likely a SportyBet or betting booking code.
- * Looking for context clues (sporty/odds/bet/code/booking) + 6-10 character alphanumeric string.
- */
-const isBettingCode = (text) => {
-    if (!text) return false;
-    const lowerText = text.toLowerCase();
-    
-    // Some common keywords associated with betting codes
-    const keywords = ['sporty', 'code', 'odds', 'booking', 'bet', 'stake'];
-    const hasKeyword = keywords.some(kw => lowerText.includes(kw));
-
-    // A code is typically 6-10 letters/numbers mixed. (e.g., BC8E12F or 6A3CDE4)
-    // We look for words that have a mix of letters and numbers or uppercase words.
-    // The following regex checks for 5 to 10 alphanumeric characters.
-    const codeRegex = /\\b[A-Za-z0-9]{5,10}\\b/;
-    
-    // If it's a very short message (just the code) or has keywords
-    if (text.length <= 15 && codeRegex.test(text)) {
-        return true;
-    }
-    
-    // If it has keywords and a matching code
-    if (hasKeyword && codeRegex.test(text)) {
-        return true;
-    }
-
-    return false;
-};
-
-/**
  * Handle incoming messages from WhatsApp.
- * Logs all group messages and processes commands.
  */
 const handleMessage = async (msg) => {
     const chat = await msg.getChat();
@@ -86,42 +94,23 @@ const handleMessage = async (msg) => {
     // Log every group message to the database
     logMessage(msg.id._serialized, msg.from, chat.name, msg.body);
 
-    // ─── SportyBet Code Detection ─────────────────────────────────────────
-    if (isBettingCode(msg.body)) {
-        const subs = getBettingSubs(chat.id._serialized);
-        
-        // Exclude the sender themselves
-        const taggedSubs = subs.filter(sub => sub !== msg.from);
+    // ─── Auto-detect prediction market links ─────────────────────────────
+    const urls = msg.body.match(URL_REGEX) || [];
+    const predictionUrls = urls.filter(isPredictionUrl);
 
-        if (taggedSubs.length > 0) {
-            let text = '🎲 *Betting Code Detected!* \nTagging interested members:\n\n';
-            const mentions = [];
-            
-            for (const subId of taggedSubs) {
-                try {
-                    const contact = await chat.client.getContactById(subId);
-                    mentions.push(contact);
-                    text += `@${subId.split('@')[0]} `;
-                } catch (err) {
-                     console.error(`Could not fetch contact ${subId}: ${err.message}`);
-                }
-            }
-            
-            await msg.reply(text, chat.id._serialized, { mentions });
+    if (predictionUrls.length > 0) {
+        let description = msg.body;
+        for (const url of predictionUrls) {
+            description = description.replace(url, '').trim();
         }
-    }
 
-    // ─── Auto-delete links from non-admins ───────────────────────────────
-    // We do this after betting code detection in case a link also happens to be a sportybet link.
-    if (URL_REGEX.test(msg.body) && !isAdmin(chat, msg.from)) {
-        try {
-            await msg.delete(true); // delete for everyone
-            await chat.sendMessage(`⚠️ @${msg.from.split('@')[0]} — Links are not allowed from non-admin members.`, {
-                mentions: [await msg.getContact()]
-            });
-        } catch (err) {
-            console.error('Error deleting link message:', err.message);
+        for (const url of predictionUrls) {
+            savePrediction(msg.id._serialized, msg.from, chat.id._serialized, url, description);
         }
+
+        const count = predictionUrls.length;
+        const plural = count > 1 ? `${count} predictions` : 'prediction';
+        await msg.reply(`✅ Saved ${plural}! Type /predictions or /find <keyword> to look it up.`);
         return;
     }
 
@@ -147,6 +136,7 @@ const handleMessage = async (msg) => {
                 try {
                     const contact = await chat.client.getContactById(participant.id._serialized);
                     mentions.push(contact);
+                    const name = contact.pushname || contact.name || participant.id.user;
                     text += `@${participant.id.user} `;
                 } catch (err) {
                     console.error(`Could not fetch contact ${participant.id.user}:`, err.message);
@@ -171,24 +161,21 @@ const handleMessage = async (msg) => {
 
         const inviter = mentionedContacts[0];
 
-        // 1. Prevent multiple intros
         if (hasIntroLog(msg.from, chat.id._serialized)) {
             await msg.reply('🚫 You have already registered who invited you!');
             return;
         }
 
-        // 2. Check if the tagged person is actually in the group
         const isParticipant = chat.participants.find(p => p.id._serialized === inviter.id._serialized);
         if (!isParticipant) {
-             await msg.reply(`🚫 The person you tagged (@${inviter.id.user}) is not currently in this group.`);
-             return;
+            const inviterName = await getDisplayName(chat.client, inviter.id._serialized);
+            await msg.reply(`🚫 *${inviterName}* is not currently in this group.`);
+            return;
         }
 
-        const senderContact = await msg.getContact();
-        const senderName = senderContact.pushname || msg.from.split('@')[0];
-        const inviterName = inviter.pushname || inviter.id.user;
+        const senderName = await getDisplayName(chat.client, msg.from);
+        const inviterName = await getDisplayName(chat.client, inviter.id._serialized);
 
-        // Log retroactive invite
         logInvite(msg.from, chat.id._serialized, chat.name, inviter.id._serialized, 'intro');
 
         await chat.sendMessage(
@@ -198,17 +185,158 @@ const handleMessage = async (msg) => {
         return;
     }
 
-    // ─── Command: /odds_on ───────────────────────────────────────────────
-    if (msg.body === '/odds_on') {
-        addBettingSub(msg.from, chat.id._serialized);
-        await msg.reply('✅ You are now subscribed! I will tag you whenever someone drops a betting code or odds.');
+    // ─── Command: /invites ───────────────────────────────────────────────
+    if (msg.body === '/invites') {
+        const logs = getInviteLogs(chat.id._serialized, 20);
+        if (logs.length === 0) {
+            await msg.reply('📭 No invite/join activity recorded yet.\n\nTip: Ask members to type "/intro @person" to register who invited them!');
+            return;
+        }
+
+        let text = '📊 *Group Invite History*\n\n';
+        for (const log of logs) {
+            const userName = await getDisplayName(chat.client, log.userId);
+            const inviterName = log.invitedBy !== 'unknown'
+                ? await getDisplayName(chat.client, log.invitedBy)
+                : 'invite link';
+
+            let emoji;
+            switch (log.action) {
+                case 'join':   emoji = '➡️'; break;
+                case 'intro':  emoji = '📝'; break;
+                case 'kicked': emoji = '🦵'; break;
+                case 'banned': emoji = '🔨'; break;
+                case 'left':   emoji = '⬅️'; break;
+                default:       emoji = '❓';
+            }
+            const date = log.timestamp.split(' ')[0];
+            text += `${emoji} *${userName}* — ${log.action} (by ${inviterName}) — ${date}\n`;
+        }
+        await msg.reply(text);
         return;
     }
 
-    // ─── Command: /odds_off ──────────────────────────────────────────────
-    if (msg.body === '/odds_off') {
-        removeBettingSub(msg.from, chat.id._serialized);
-        await msg.reply('🚫 You have been unsubscribed from betting notification tags.');
+    // ─── Command: /leaderboard ───────────────────────────────────────────
+    if (msg.body === '/leaderboard') {
+        try {
+            const leaders = getInviteLeaderboard(chat.id._serialized, 10);
+
+            if (leaders.length === 0) {
+                await msg.reply('🏆 No invite data recorded yet.\n\nAsk members to type "/intro @person" to give credit!');
+                return;
+            }
+
+            let text = '🏆 *Top Inviters Leaderboard*\n\n';
+            for (let i = 0; i < leaders.length; i++) {
+                const leader = leaders[i];
+                const inviterName = await getDisplayName(chat.client, leader.invitedBy);
+
+                let medal = '🏅';
+                if (i === 0) medal = '🥇';
+                if (i === 1) medal = '🥈';
+                if (i === 2) medal = '🥉';
+
+                text += `${medal} *${inviterName}* — ${leader.count} invite${leader.count !== 1 ? 's' : ''}\n`;
+            }
+            await msg.reply(text);
+        } catch (err) {
+            console.error('[ERROR] Leaderboard command failed:', err);
+            await msg.reply('❌ An error occurred while generating the leaderboard.');
+        }
+        return;
+    }
+
+    // ─── Command: /active — Most messages leaderboard ────────────────────
+    if (msg.body === '/active') {
+        try {
+            const leaders = getActivityLeaderboard(chat.name, 10);
+
+            if (leaders.length === 0) {
+                await msg.reply('📊 No activity data yet. Keep chatting!');
+                return;
+            }
+
+            let text = '🔥 *Most Active Members*\n\n';
+            for (let i = 0; i < leaders.length; i++) {
+                const leader = leaders[i];
+                const name = await getDisplayName(chat.client, leader.sender);
+
+                let medal = '🏅';
+                if (i === 0) medal = '🥇';
+                if (i === 1) medal = '🥈';
+                if (i === 2) medal = '🥉';
+
+                text += `${medal} *${name}* — ${leader.count} message${leader.count !== 1 ? 's' : ''}\n`;
+            }
+            await msg.reply(text);
+        } catch (err) {
+            console.error('[ERROR] Activity leaderboard failed:', err);
+            await msg.reply('❌ An error occurred while generating the activity leaderboard.');
+        }
+        return;
+    }
+
+    // ─── Command: /predictions ───────────────────────────────────────────
+    if (msg.body === '/predictions') {
+        const predictions = getRecentPredictions(chat.id._serialized, 10);
+
+        if (predictions.length === 0) {
+            await msg.reply('📭 No predictions saved yet.\n\nPost a FanClubz prediction link and I\'ll track it automatically!');
+            return;
+        }
+
+        let text = '📊 *Recent Predictions*\n\n';
+        for (let i = 0; i < predictions.length; i++) {
+            const p = predictions[i];
+            const name = await getDisplayName(chat.client, p.sender);
+            const desc = p.description ? ` — _${p.description.substring(0, 80)}_` : '';
+            const date = p.timestamp.split(' ')[0];
+            text += `${i + 1}. ${p.url}${desc}\n   📅 ${date} · 👤 ${name}\n\n`;
+        }
+
+        await msg.reply(text);
+        return;
+    }
+
+    // ─── Command: /find <keyword> ────────────────────────────────────────
+    if (msg.body.startsWith('/find ')) {
+        const query = msg.body.slice(6).trim();
+
+        if (!query) {
+            await msg.reply('ℹ️ Usage: /find <keyword>\n\nExample: /find trump\nExample: /find polymarket');
+            return;
+        }
+
+        const results = searchPredictions(chat.id._serialized, query, 10);
+
+        if (results.length === 0) {
+            await msg.reply(`🔍 No predictions found matching "*${query}*".\n\nTry a different keyword or type /predictions to see all recent posts.`);
+            return;
+        }
+
+        let text = `🔍 *Predictions matching "${query}"*\n\n`;
+        for (let i = 0; i < results.length; i++) {
+            const p = results[i];
+            const name = await getDisplayName(chat.client, p.sender);
+            const desc = p.description ? ` — _${p.description.substring(0, 80)}_` : '';
+            const date = p.timestamp.split(' ')[0];
+            text += `${i + 1}. ${p.url}${desc}\n   📅 ${date} · 👤 ${name}\n\n`;
+        }
+
+        await msg.reply(text);
+        return;
+    }
+
+    // ─── Command: /stats ─────────────────────────────────────────────────
+    if (msg.body === '/stats') {
+        const count = getPredictionCount(chat.id._serialized);
+
+        let text = '📈 *Group Prediction Stats*\n\n';
+        text += `🔢 Total predictions tracked: *${count}*\n`;
+        text += `🌐 Platform: FanClubz\n\n`;
+        text += `_Post a FanClubz prediction link and I'll save it automatically!_`;
+
+        await msg.reply(text);
         return;
     }
 
@@ -227,14 +355,14 @@ const handleMessage = async (msg) => {
 
         for (const contact of mentionedContacts) {
             try {
+                const contactName = await getDisplayName(chat.client, contact.id._serialized);
                 await chat.removeParticipants([contact.id._serialized]);
                 logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'kicked');
-                await chat.sendMessage(`🦵 @${contact.id.user} has been kicked by an admin.`, {
-                    mentions: [contact]
-                });
+                await chat.sendMessage(`🦵 *${contactName}* has been kicked by an admin.`);
             } catch (err) {
                 console.error(`Error kicking ${contact.id.user}:`, err.message);
-                await msg.reply(`❌ Could not kick @${contact.id.user}. Make sure the bot is an admin.`);
+                const contactName = await getDisplayName(chat.client, contact.id._serialized);
+                await msg.reply(`❌ Could not kick *${contactName}*. Make sure the bot is an admin.`);
             }
         }
         return;
@@ -255,122 +383,38 @@ const handleMessage = async (msg) => {
 
         for (const contact of mentionedContacts) {
             try {
+                const contactName = await getDisplayName(chat.client, contact.id._serialized);
                 await chat.removeParticipants([contact.id._serialized]);
                 logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'banned');
-                await chat.sendMessage(`🔨 @${contact.id.user} has been banned by an admin.`, {
-                    mentions: [contact]
-                });
+                await chat.sendMessage(`🔨 *${contactName}* has been banned by an admin.`);
             } catch (err) {
                 console.error(`Error banning ${contact.id.user}:`, err.message);
-                await msg.reply(`❌ Could not ban @${contact.id.user}. Make sure the bot is an admin.`);
+                const contactName = await getDisplayName(chat.client, contact.id._serialized);
+                await msg.reply(`❌ Could not ban *${contactName}*. Make sure the bot is an admin.`);
             }
-        }
-        return;
-    }
-
-    // ─── Command: /invites ───────────────────────────────────────────────
-    if (msg.body === '/invites') {
-        const logs = getInviteLogs(chat.id._serialized, 20);
-        if (logs.length === 0) {
-            await msg.reply('📭 No invite/join activity recorded yet.\n\nTip: Ask members to type "/intro @person" to register who invited them!');
-            return;
-        }
-
-        let text = '📊 *Group Invite History*\n\n';
-        for (const log of logs) {
-            let userName = log.userId.split('@')[0];
-            let inviterName = log.invitedBy !== 'unknown' ? log.invitedBy.split('@')[0] : 'invite link';
-
-            try {
-                const userContact = await chat.client.getContactById(log.userId);
-                if (userContact && (userContact.pushname || userContact.name)) {
-                    userName = userContact.pushname || userContact.name;
-                }
-            } catch (err) {}
-
-            try {
-                if (log.invitedBy !== 'unknown') {
-                    const inviterContact = await chat.client.getContactById(log.invitedBy);
-                    if (inviterContact && (inviterContact.pushname || inviterContact.name)) {
-                        inviterName = inviterContact.pushname || inviterContact.name;
-                    }
-                }
-            } catch (err) {}
-
-            let emoji;
-            switch (log.action) {
-                case 'join':   emoji = '➡️'; break;
-                case 'intro':  emoji = '📝'; break;
-                case 'kicked': emoji = '🦵'; break;
-                case 'banned': emoji = '🔨'; break;
-                case 'left':   emoji = '⬅️'; break;
-                default:       emoji = '❓';
-            }
-            text += `${emoji} *${userName}* — ${log.action} (by ${inviterName}) — ${log.timestamp}\n`;
-        }
-        await msg.reply(text);
-        return;
-    }
-
-    // ─── Command: /leaderboard ───────────────────────────────────────────
-    if (msg.body === '/leaderboard') {
-        try {
-            console.log(`[DEBUG] Fetching leaderboard for group: ${chat.id._serialized}`);
-            const leaders = getInviteLeaderboard(chat.id._serialized, 10);
-            console.log(`[DEBUG] Leaderboard data:`, leaders);
-
-            if (leaders.length === 0) {
-                await msg.reply('🏆 No invite data recorded yet.\n\nAsk members to type "/intro @person" to give credit!');
-                return;
-            }
-
-            let text = '🏆 *Top Inviters Leaderboard*\n\n';
-            for (let i = 0; i < leaders.length; i++) {
-                const leader = leaders[i];
-                let inviterName = leader.invitedBy.split('@')[0];
-
-                try {
-                    const contact = await chat.client.getContactById(leader.invitedBy);
-                    if (contact && (contact.pushname || contact.name)) {
-                        inviterName = contact.pushname || contact.name;
-                    }
-                } catch (err) {
-                    console.error(`[DEBUG] Could not fetch contact for leaderboard: ${leader.invitedBy}`);
-                }
-
-                let medal = '🏅';
-                if (i === 0) medal = '🥇';
-                if (i === 1) medal = '🥈';
-                if (i === 2) medal = '🥉';
-
-                text += `${medal} *${inviterName}* — ${leader.count} invites\n`;
-            }
-            await msg.reply(text);
-        } catch (err) {
-            console.error('[ERROR] Leaderboard command failed:', err);
-            await msg.reply('❌ An error occurred while generating the leaderboard.');
         }
         return;
     }
 };
 
 /**
- * Handle group membership changes (join/leave).
+ * Handle group membership changes (join).
  */
 const handleGroupJoin = async (notification) => {
     try {
         const chat = await notification.getChat();
         if (!chat.isGroup) return;
 
-        // recipientIds = who joined, author = who added them
         const joinedUsers = notification.recipientIds || [];
         const inviter = notification.author || 'unknown';
 
         for (const userId of joinedUsers) {
             logInvite(userId, chat.id._serialized, chat.name, inviter, 'join');
-            const userNumber = userId.split('@')[0];
-            const inviterNumber = inviter !== 'unknown' ? inviter.split('@')[0] : 'invite link';
-            console.log(`📥 ${userNumber} joined "${chat.name}" (invited by ${inviterNumber})`);
+            const userName = await getDisplayName(chat.client, userId);
+            const inviterName = inviter !== 'unknown'
+                ? await getDisplayName(chat.client, inviter)
+                : 'invite link';
+            console.log(`📥 ${userName} joined "${chat.name}" (invited by ${inviterName})`);
         }
     } catch (err) {
         console.error('Error handling group join:', err.message);
@@ -388,8 +432,8 @@ const handleGroupLeave = async (notification) => {
         const leftUsers = notification.recipientIds || [];
         for (const userId of leftUsers) {
             logInvite(userId, chat.id._serialized, chat.name, notification.author || 'self', 'left');
-            const userNumber = userId.split('@')[0];
-            console.log(`📤 ${userNumber} left "${chat.name}"`);
+            const userName = await getDisplayName(chat.client, userId);
+            console.log(`📤 ${userName} left "${chat.name}"`);
         }
     } catch (err) {
         console.error('Error handling group leave:', err.message);

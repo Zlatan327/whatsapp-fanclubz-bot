@@ -31,7 +31,7 @@ client.on('ready', () => {
     botReady = true;
     latestQrDataUrl = null;
     console.log('✅ Client is ready! The bot is now running.\n');
-    console.log('Commands: /rules · /everyone · /kick · /ban · /invites · /help\n');
+    console.log('Commands: /rules · /everyone · /predictions · /find · /active · /leaderboard · /help\n');
 });
 
 client.on('auth_failure', (msg) => {
