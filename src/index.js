@@ -112,7 +112,7 @@ let client;
             }),
             authTimeoutMs: 60000,
             puppeteer: {
-                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome' || process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
                 headless: true,
                 args: [
                     '--no-sandbox', 
