@@ -1,6 +1,8 @@
 require('dotenv').config();
 const http = require('http');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { MongoStore } = require('wwebjs-mongo');
+const mongoose = require('mongoose');
 const qrTerminal = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const { handleMessage, handleGroupJoin, handleGroupLeave } = require('./messageHandler');
@@ -9,53 +11,6 @@ const { initDb, close: closeDb } = require('./database');
 // ─── State for QR code ───────────────────────────────────────────────────────
 let latestQrDataUrl = null;
 let botReady = false;
-
-// ─── WhatsApp Client ─────────────────────────────────────────────────────────
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: {
-        executablePath: process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    }
-});
-
-// On QR — generate data URL and serve via HTTP
-client.on('qr', async (qr) => {
-    qrTerminal.generate(qr, { small: true });
-    latestQrDataUrl = await QRCode.toDataURL(qr, { width: 400 });
-    console.log('\n🔐 QR code ready! Open http://localhost:4588 in your browser to scan.\n');
-});
-
-client.on('ready', () => {
-    botReady = true;
-    latestQrDataUrl = null;
-    console.log('✅ Client is ready! The bot is now running.\n');
-    console.log('Commands: /rules · /everyone · /predictions · /find · /active · /leaderboard · /help\n');
-});
-
-client.on('auth_failure', (msg) => {
-    console.error('❌ Authentication failed:', msg);
-    process.exit(1);
-});
-
-client.on('disconnected', (reason) => {
-    console.log('🔌 Client disconnected:', reason);
-    botReady = false;
-});
-
-client.on('message_create', async (msg) => {
-    if (msg.fromMe) return;
-    await handleMessage(msg);
-});
-
-client.on('group_join', async (notification) => {
-    await handleGroupJoin(notification);
-});
-
-client.on('group_leave', async (notification) => {
-    await handleGroupLeave(notification);
-});
 
 // ─── Local HTTP server to display QR code ────────────────────────────────────
 const QR_PORT = process.env.PORT || 4588;
@@ -129,23 +84,96 @@ server.listen(QR_PORT, () => {
     console.log(`🌐 QR code viewer running at http://localhost:${QR_PORT}`);
 });
 
-// ─── Graceful shutdown ───────────────────────────────────────────────────────
-process.on('SIGINT', async () => {
-    console.log('\n🛑 Shutting down gracefully...');
-    server.close();
-    await client.destroy();
-    closeDb();
-    process.exit(0);
-});
+let client;
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 (async () => {
     try {
+        if (!process.env.MONGODB_URI) {
+            console.error('\n❌ CRITICAL ERROR: MONGODB_URI is not set in your .env file or environment variables.');
+            console.error('You must provide a MongoDB connection string to use RemoteAuth and persistent data.\n');
+            process.exit(1);
+        }
+
+        console.log('🔗 Connecting to MongoDB...');
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log('✅ Connected to MongoDB.');
+
         await initDb();
         console.log('🚀 Starting WhatsApp bot...');
+
+        const store = new MongoStore({ mongoose: mongoose });
+
+        client = new Client({
+            authStrategy: new RemoteAuth({
+                clientId: 'whatsapp-fanclubz', // Unique ID for this session
+                store: store,
+                backupSyncIntervalMs: 300000
+            }),
+            puppeteer: {
+                executablePath: process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
+                headless: true,
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+            }
+        });
+
+        // ─── Event listeners ───────────────────────────────────────────────
+        client.on('qr', async (qr) => {
+            qrTerminal.generate(qr, { small: true });
+            latestQrDataUrl = await QRCode.toDataURL(qr, { width: 400 });
+            console.log('\n🔐 QR code ready! Open http://localhost:4588 in your browser to scan.\n');
+        });
+
+        client.on('remote_session_saved', () => {
+            console.log('☁️  WhatsApp session was successfully saved to MongoDB!');
+        });
+
+        client.on('ready', () => {
+            botReady = true;
+            latestQrDataUrl = null;
+            console.log('✅ Client is ready! The bot is now running.\n');
+            console.log('Commands: /rules · /everyone · /predictions · /find · /active · /leaderboard · /help\n');
+        });
+
+        client.on('auth_failure', (msg) => {
+            console.error('❌ Authentication failed:', msg);
+            process.exit(1);
+        });
+
+        client.on('disconnected', (reason) => {
+            console.log('🔌 Client disconnected:', reason);
+            botReady = false;
+        });
+
+        client.on('message_create', async (msg) => {
+            if (msg.fromMe) return;
+            await handleMessage(msg);
+        });
+
+        client.on('group_join', async (notification) => {
+            await handleGroupJoin(notification);
+        });
+
+        client.on('group_leave', async (notification) => {
+            await handleGroupLeave(notification);
+        });
+
         client.initialize();
+
     } catch (err) {
         console.error('Failed to start:', err);
         process.exit(1);
     }
 })();
+
+// ─── Graceful shutdown ───────────────────────────────────────────────────────
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    server.close();
+    if (client) {
+        await client.destroy();
+    }
+    await closeDb();
+    await mongoose.disconnect();
+    process.exit(0);
+});

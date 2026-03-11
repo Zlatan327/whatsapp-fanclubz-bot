@@ -1,107 +1,59 @@
-const initSqlJs = require('sql.js');
-const fs = require('fs');
-const path = require('path');
+const mongoose = require('mongoose');
 
-const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, '../activity.sqlite');
+// Mongoose Models
+const activitySchema = new mongoose.Schema({
+    messageId: String,
+    sender: String,
+    groupName: String,
+    body: String,
+    timestamp: { type: Date, default: Date.now }
+});
+const ActivityLog = mongoose.model('ActivityLog', activitySchema);
 
-let db;
+const inviteSchema = new mongoose.Schema({
+    userId: String,
+    groupId: String,
+    groupName: String,
+    invitedBy: { type: String, default: 'unknown' },
+    action: { type: String, default: 'join' },
+    timestamp: { type: Date, default: Date.now }
+});
+const InviteLog = mongoose.model('InviteLog', inviteSchema);
 
-/**
- * Initialize the SQLite database using sql.js (pure JS, no native build).
- * Loads existing data from disk if the file exists.
- */
+const predictionSchema = new mongoose.Schema({
+    messageId: String,
+    sender: String,
+    groupId: String,
+    url: String,
+    description: String,
+    timestamp: { type: Date, default: Date.now }
+});
+const Prediction = mongoose.model('Prediction', predictionSchema);
+
 const initDb = async () => {
-    const SQL = await initSqlJs();
-
-    if (fs.existsSync(DB_PATH)) {
-        const fileBuffer = fs.readFileSync(DB_PATH);
-        db = new SQL.Database(fileBuffer);
-    } else {
-        db = new SQL.Database();
-    }
-
-    // Activity log table — tracks every message for activity leaderboard
-    db.run(`CREATE TABLE IF NOT EXISTS activity_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        messageId TEXT,
-        sender TEXT,
-        groupName TEXT,
-        body TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Invite tracking table — tracks who invited whom
-    db.run(`CREATE TABLE IF NOT EXISTS invite_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        userId TEXT,
-        groupId TEXT,
-        groupName TEXT,
-        invitedBy TEXT,
-        action TEXT DEFAULT 'join',
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Predictions table — stores prediction market links posted in the group
-    db.run(`CREATE TABLE IF NOT EXISTS predictions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        messageId TEXT,
-        sender TEXT,
-        groupId TEXT,
-        url TEXT,
-        description TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    )`);
-
-    // Persist the initial schema to disk
-    save();
-    console.log('📦 Database initialized at', DB_PATH);
-};
-
-/**
- * Persist the in-memory database to disk.
- */
-const save = () => {
-    const data = db.export();
-    const buffer = Buffer.from(data);
-    fs.writeFileSync(DB_PATH, buffer);
+    // We connect to Mongoose from index.js directly.
+    console.log('📦 Database models initialized');
 };
 
 // ─── Activity Logging ────────────────────────────────────────────────────────
 
-/**
- * Log a group message to the SQLite database.
- */
-const logMessage = (messageId, sender, groupName, body) => {
+const logMessage = async (messageId, sender, groupName, body) => {
     try {
-        db.run(
-            'INSERT INTO activity_log (messageId, sender, groupName, body) VALUES (?, ?, ?, ?)',
-            [messageId, sender, groupName, body]
-        );
-        save();
+        await ActivityLog.create({ messageId, sender, groupName, body });
     } catch (err) {
         console.error('Error logging message:', err.message);
     }
 };
 
-/**
- * Get top message senders for a group (most-active leaderboard).
- */
-const getActivityLeaderboard = (groupName, limit = 10) => {
+const getActivityLeaderboard = async (groupName, limit = 10) => {
     try {
-        const results = db.exec(
-            `SELECT sender, COUNT(*) as count 
-             FROM activity_log 
-             WHERE groupName = ?
-             GROUP BY sender 
-             ORDER BY count DESC 
-             LIMIT ?`,
-            [groupName, limit]
-        );
-        if (results.length === 0) return [];
-        return results[0].values.map(row => ({
-            sender: row[0],
-            count: row[1]
-        }));
+        const results = await ActivityLog.aggregate([
+            { $match: { groupName: String(groupName) } },
+            { $group: { _id: "$sender", count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: limit }
+        ]);
+        return results.map(row => ({ sender: row._id, count: row.count }));
     } catch (err) {
         console.error('Error fetching activity leaderboard:', err.message);
         return [];
@@ -110,36 +62,25 @@ const getActivityLeaderboard = (groupName, limit = 10) => {
 
 // ─── Invite Tracking ─────────────────────────────────────────────────────────
 
-/**
- * Log a group membership change (join/leave/kick/ban/intro).
- */
-const logInvite = (userId, groupId, groupName, invitedBy, action = 'join') => {
+const logInvite = async (userId, groupId, groupName, invitedBy, action = 'join') => {
     try {
-        db.run(
-            'INSERT INTO invite_log (userId, groupId, groupName, invitedBy, action) VALUES (?, ?, ?, ?, ?)',
-            [userId, groupId, groupName, invitedBy || 'unknown', action]
-        );
-        save();
+        await InviteLog.create({ userId, groupId, groupName, invitedBy: invitedBy || 'unknown', action });
     } catch (err) {
         console.error('Error logging invite:', err.message);
     }
 };
 
-/**
- * Get recent invite logs for a group.
- */
-const getInviteLogs = (groupId, limit = 10) => {
+const getInviteLogs = async (groupId, limit = 10) => {
     try {
-        const results = db.exec(
-            'SELECT userId, invitedBy, action, timestamp FROM invite_log WHERE groupId = ? ORDER BY id DESC LIMIT ?',
-            [groupId, limit]
-        );
-        if (results.length === 0) return [];
-        return results[0].values.map(row => ({
-            userId: row[0],
-            invitedBy: row[1],
-            action: row[2],
-            timestamp: row[3]
+        const results = await InviteLog.find({ groupId })
+            .sort({ _id: -1 })
+            .limit(limit)
+            .lean();
+        return results.map(row => ({
+            userId: row.userId,
+            invitedBy: row.invitedBy,
+            action: row.action,
+            timestamp: row.timestamp
         }));
     } catch (err) {
         console.error('Error fetching invite logs:', err.message);
@@ -147,42 +88,25 @@ const getInviteLogs = (groupId, limit = 10) => {
     }
 };
 
-/**
- * Check if a user has already registered who invited them in a group.
- */
-const hasIntroLog = (userId, groupId) => {
+const hasIntroLog = async (userId, groupId) => {
     try {
-        const results = db.exec(
-            "SELECT COUNT(*) FROM invite_log WHERE userId = ? AND groupId = ? AND action = 'intro'",
-            [userId, groupId]
-        );
-        if (results.length === 0) return false;
-        return results[0].values[0][0] > 0;
+        const count = await InviteLog.countDocuments({ userId, groupId, action: 'intro' });
+        return count > 0;
     } catch (err) {
         console.error('Error checking intro log:', err.message);
         return false;
     }
 };
 
-/**
- * Get a leaderboard of who invited the most people in a group.
- */
-const getInviteLeaderboard = (groupId, limit = 10) => {
+const getInviteLeaderboard = async (groupId, limit = 10) => {
     try {
-        const results = db.exec(
-            `SELECT invitedBy, COUNT(*) as count 
-             FROM invite_log 
-             WHERE groupId = ? AND invitedBy != 'unknown' AND (action = 'join' OR action = 'intro')
-             GROUP BY invitedBy 
-             ORDER BY count DESC 
-             LIMIT ?`,
-            [groupId, limit]
-        );
-        if (results.length === 0) return [];
-        return results[0].values.map(row => ({
-            invitedBy: row[0],
-            count: row[1]
-        }));
+        const results = await InviteLog.aggregate([
+            { $match: { groupId: String(groupId), invitedBy: { $ne: 'unknown' }, action: { $in: ['join', 'intro'] } } },
+            { $group: { _id: "$invitedBy", count: { $sum: 1 } } },
+            { $sort: { count: -1 } },
+            { $limit: limit }
+        ]);
+        return results.map(row => ({ invitedBy: row._id, count: row.count }));
     } catch (err) {
         console.error('Error fetching invite leaderboard:', err.message);
         return [];
@@ -191,36 +115,25 @@ const getInviteLeaderboard = (groupId, limit = 10) => {
 
 // ─── Predictions ─────────────────────────────────────────────────────────────
 
-/**
- * Save a prediction market link to the database.
- */
-const savePrediction = (messageId, sender, groupId, url, description) => {
+const savePrediction = async (messageId, sender, groupId, url, description) => {
     try {
-        db.run(
-            'INSERT INTO predictions (messageId, sender, groupId, url, description) VALUES (?, ?, ?, ?, ?)',
-            [messageId, sender, groupId, url, description || '']
-        );
-        save();
+        await Prediction.create({ messageId, sender, groupId, url, description: description || '' });
     } catch (err) {
         console.error('Error saving prediction:', err.message);
     }
 };
 
-/**
- * Get recent predictions for a group.
- */
-const getRecentPredictions = (groupId, limit = 10) => {
+const getRecentPredictions = async (groupId, limit = 10) => {
     try {
-        const results = db.exec(
-            'SELECT sender, url, description, timestamp FROM predictions WHERE groupId = ? ORDER BY id DESC LIMIT ?',
-            [groupId, limit]
-        );
-        if (results.length === 0) return [];
-        return results[0].values.map(row => ({
-            sender: row[0],
-            url: row[1],
-            description: row[2],
-            timestamp: row[3]
+        const results = await Prediction.find({ groupId: String(groupId) })
+            .sort({ _id: -1 })
+            .limit(limit)
+            .lean();
+        return results.map(row => ({
+            sender: row.sender,
+            url: row.url,
+            description: row.description,
+            timestamp: row.timestamp
         }));
     } catch (err) {
         console.error('Error fetching predictions:', err.message);
@@ -228,23 +141,25 @@ const getRecentPredictions = (groupId, limit = 10) => {
     }
 };
 
-/**
- * Search predictions by keyword in their description or URL.
- */
-const searchPredictions = (groupId, query, limit = 10) => {
+const searchPredictions = async (groupId, query, limit = 10) => {
     try {
-        const results = db.exec(
-            `SELECT sender, url, description, timestamp FROM predictions 
-             WHERE groupId = ? AND (LOWER(description) LIKE LOWER(?) OR LOWER(url) LIKE LOWER(?))
-             ORDER BY id DESC LIMIT ?`,
-            [groupId, `%${query}%`, `%${query}%`, limit]
-        );
-        if (results.length === 0) return [];
-        return results[0].values.map(row => ({
-            sender: row[0],
-            url: row[1],
-            description: row[2],
-            timestamp: row[3]
+        const regex = new RegExp(query, 'i');
+        const results = await Prediction.find({
+            groupId: String(groupId),
+            $or: [
+                { description: { $regex: regex } },
+                { url: { $regex: regex } }
+            ]
+        })
+        .sort({ _id: -1 })
+        .limit(limit)
+        .lean();
+        
+        return results.map(row => ({
+            sender: row.sender,
+            url: row.url,
+            description: row.description,
+            timestamp: row.timestamp
         }));
     } catch (err) {
         console.error('Error searching predictions:', err.message);
@@ -252,38 +167,17 @@ const searchPredictions = (groupId, query, limit = 10) => {
     }
 };
 
-/**
- * Get the total number of predictions stored for a group.
- */
-const getPredictionCount = (groupId) => {
+const getPredictionCount = async (groupId) => {
     try {
-        const results = db.exec(
-            'SELECT COUNT(*) FROM predictions WHERE groupId = ?',
-            [groupId]
-        );
-        if (results.length === 0) return 0;
-        return results[0].values[0][0];
+        return await Prediction.countDocuments({ groupId: String(groupId) });
     } catch (err) {
         console.error('Error counting predictions:', err.message);
         return 0;
     }
 };
 
-// ─── Close ───────────────────────────────────────────────────────────────────
-
-/**
- * Close the database connection gracefully.
- */
-const close = () => {
-    try {
-        if (db) {
-            save();
-            db.close();
-            console.log('Database connection closed.');
-        }
-    } catch (err) {
-        console.error('Error closing database:', err.message);
-    }
+const close = async () => {
+    console.log('Database cleanup complete.');
 };
 
 module.exports = { 

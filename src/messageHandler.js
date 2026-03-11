@@ -92,7 +92,7 @@ const handleMessage = async (msg) => {
     if (!chat.isGroup) return;
 
     // Log every group message to the database
-    logMessage(msg.id._serialized, msg.from, chat.name, msg.body);
+    await logMessage(msg.id._serialized, msg.from, chat.name, msg.body);
 
     // ─── Auto-detect prediction market links ─────────────────────────────
     const urls = msg.body.match(URL_REGEX) || [];
@@ -105,7 +105,7 @@ const handleMessage = async (msg) => {
         }
 
         for (const url of predictionUrls) {
-            savePrediction(msg.id._serialized, msg.from, chat.id._serialized, url, description);
+            await savePrediction(msg.id._serialized, msg.from, chat.id._serialized, url, description);
         }
 
         const count = predictionUrls.length;
@@ -161,7 +161,7 @@ const handleMessage = async (msg) => {
 
         const inviter = mentionedContacts[0];
 
-        if (hasIntroLog(msg.from, chat.id._serialized)) {
+        if (await hasIntroLog(msg.from, chat.id._serialized)) {
             await msg.reply('🚫 You have already registered who invited you!');
             return;
         }
@@ -176,7 +176,7 @@ const handleMessage = async (msg) => {
         const senderName = await getDisplayName(chat.client, msg.from);
         const inviterName = await getDisplayName(chat.client, inviter.id._serialized);
 
-        logInvite(msg.from, chat.id._serialized, chat.name, inviter.id._serialized, 'intro');
+        await logInvite(msg.from, chat.id._serialized, chat.name, inviter.id._serialized, 'intro');
 
         await chat.sendMessage(
             `📝 Noted! *${senderName}* was invited by *${inviterName}* @${inviter.id.user}`,
@@ -187,7 +187,7 @@ const handleMessage = async (msg) => {
 
     // ─── Command: /invites ───────────────────────────────────────────────
     if (msg.body === '/invites') {
-        const logs = getInviteLogs(chat.id._serialized, 20);
+        const logs = await getInviteLogs(chat.id._serialized, 20);
         if (logs.length === 0) {
             await msg.reply('📭 No invite/join activity recorded yet.\n\nTip: Ask members to type "/intro @person" to register who invited them!');
             return;
@@ -219,7 +219,7 @@ const handleMessage = async (msg) => {
     // ─── Command: /leaderboard ───────────────────────────────────────────
     if (msg.body === '/leaderboard') {
         try {
-            const leaders = getInviteLeaderboard(chat.id._serialized, 10);
+            const leaders = await getInviteLeaderboard(chat.id._serialized, 10);
 
             if (leaders.length === 0) {
                 await msg.reply('🏆 No invite data recorded yet.\n\nAsk members to type "/intro @person" to give credit!');
@@ -249,7 +249,7 @@ const handleMessage = async (msg) => {
     // ─── Command: /active — Most messages leaderboard ────────────────────
     if (msg.body === '/active') {
         try {
-            const leaders = getActivityLeaderboard(chat.name, 10);
+            const leaders = await getActivityLeaderboard(chat.name, 10);
 
             if (leaders.length === 0) {
                 await msg.reply('📊 No activity data yet. Keep chatting!');
@@ -278,7 +278,7 @@ const handleMessage = async (msg) => {
 
     // ─── Command: /predictions ───────────────────────────────────────────
     if (msg.body === '/predictions') {
-        const predictions = getRecentPredictions(chat.id._serialized, 10);
+        const predictions = await getRecentPredictions(chat.id._serialized, 10);
 
         if (predictions.length === 0) {
             await msg.reply('📭 No predictions saved yet.\n\nPost a FanClubz prediction link and I\'ll track it automatically!');
@@ -307,7 +307,7 @@ const handleMessage = async (msg) => {
             return;
         }
 
-        const results = searchPredictions(chat.id._serialized, query, 10);
+        const results = await searchPredictions(chat.id._serialized, query, 10);
 
         if (results.length === 0) {
             await msg.reply(`🔍 No predictions found matching "*${query}*".\n\nTry a different keyword or type /predictions to see all recent posts.`);
@@ -329,7 +329,7 @@ const handleMessage = async (msg) => {
 
     // ─── Command: /stats ─────────────────────────────────────────────────
     if (msg.body === '/stats') {
-        const count = getPredictionCount(chat.id._serialized);
+        const count = await getPredictionCount(chat.id._serialized);
 
         let text = '📈 *Group Prediction Stats*\n\n';
         text += `🔢 Total predictions tracked: *${count}*\n`;
@@ -357,7 +357,7 @@ const handleMessage = async (msg) => {
             try {
                 const contactName = await getDisplayName(chat.client, contact.id._serialized);
                 await chat.removeParticipants([contact.id._serialized]);
-                logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'kicked');
+                await logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'kicked');
                 await chat.sendMessage(`🦵 *${contactName}* has been kicked by an admin.`);
             } catch (err) {
                 console.error(`Error kicking ${contact.id.user}:`, err.message);
@@ -385,7 +385,7 @@ const handleMessage = async (msg) => {
             try {
                 const contactName = await getDisplayName(chat.client, contact.id._serialized);
                 await chat.removeParticipants([contact.id._serialized]);
-                logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'banned');
+                await logInvite(contact.id._serialized, chat.id._serialized, chat.name, msg.from, 'banned');
                 await chat.sendMessage(`🔨 *${contactName}* has been banned by an admin.`);
             } catch (err) {
                 console.error(`Error banning ${contact.id.user}:`, err.message);
@@ -409,7 +409,7 @@ const handleGroupJoin = async (notification) => {
         const inviter = notification.author || 'unknown';
 
         for (const userId of joinedUsers) {
-            logInvite(userId, chat.id._serialized, chat.name, inviter, 'join');
+            await logInvite(userId, chat.id._serialized, chat.name, inviter, 'join');
             const userName = await getDisplayName(chat.client, userId);
             const inviterName = inviter !== 'unknown'
                 ? await getDisplayName(chat.client, inviter)
@@ -431,7 +431,7 @@ const handleGroupLeave = async (notification) => {
 
         const leftUsers = notification.recipientIds || [];
         for (const userId of leftUsers) {
-            logInvite(userId, chat.id._serialized, chat.name, notification.author || 'self', 'left');
+            await logInvite(userId, chat.id._serialized, chat.name, notification.author || 'self', 'left');
             const userName = await getDisplayName(chat.client, userId);
             console.log(`📤 ${userName} left "${chat.name}"`);
         }
