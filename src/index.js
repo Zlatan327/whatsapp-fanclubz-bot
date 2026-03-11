@@ -124,7 +124,11 @@ let client;
                     '--no-zygote',
                     '--disable-gpu',
                     '--single-process',
-                    '--memory-pressure-off'
+                    '--memory-pressure-off',
+                    '--disable-features=site-per-process',
+                    '--disable-gpu-sandbox',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions'
                 ]
             }
         });
