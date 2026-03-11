@@ -61,7 +61,7 @@ const server = http.createServer((req, res) => {
     } else {
         res.end(`<!DOCTYPE html>
 <html><head><title>WhatsApp Bot — Loading</title>
-<meta http-equiv="refresh" content="2">
+<meta http-equiv="refresh" content="10">
 <style>
   body { background: #0b141a; color: #e9edef; font-family: 'Segoe UI', sans-serif;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
