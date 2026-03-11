@@ -111,7 +111,7 @@ let client;
                 backupSyncIntervalMs: 300000
             }),
             puppeteer: {
-                executablePath: process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
+                executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH || (process.platform === 'win32' ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' : undefined),
                 headless: true,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
             }
